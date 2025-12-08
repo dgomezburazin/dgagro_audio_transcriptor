@@ -11,14 +11,12 @@ from pydub import AudioSegment
 import whisper
 from tqdm import tqdm
 
-# ==========================================================
-# SUPABASE CONFIG
-# ==========================================================
-SUPABASE_URL = os.environ["SUPABASE_URL"]
-SUPABASE_KEY = os.environ["SUPABASE_KEY"]
+SUPABASE_URL = os.environ["SUPABASE_URL"].strip()
+SUPABASE_KEY = os.environ["SUPABASE_KEY"].strip()
 
 BASE = f"{SUPABASE_URL}/storage/v1/object"
-BUCKET = "dgagro360-transcripciones"  # nombre EXACTO del bucket
+BUCKET = "dgagro360-transcripciones"
+
 
 def supabase_download(path):
     """Descargar archivo desde Supabase Storage"""
