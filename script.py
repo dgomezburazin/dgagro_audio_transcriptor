@@ -1,7 +1,6 @@
 import os
 import io
 import json
-import re
 import datetime
 import hashlib
 import requests
@@ -11,183 +10,174 @@ from pydub import AudioSegment
 import whisper
 from tqdm import tqdm
 
+
+# ==========================================================
+# 🔧 CONFIG SUPABASE (USAR VARIABLES DE ENTORNO GITHUB)
+# ==========================================================
 SUPABASE_URL = os.environ["SUPABASE_URL"].strip()
 SUPABASE_KEY = os.environ["SUPABASE_KEY"].strip()
 
-BASE = f"{SUPABASE_URL}/storage/v1/object"
+# 🟢 ESTE ES TU BUCKET REAL (CORREGIDO)
 BUCKET = "dgagro360-transcripciones"
 
+HEADERS = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
 
-def supabase_download(path):
-    """Descargar archivo desde Supabase Storage"""
-    url = f"{BASE}/{path}"
-    headers = {"Authorization": f"Bearer {SUPABASE_KEY}"}
-    r = requests.get(url, headers=headers)
 
+# ==========================================================
+# 📂 UTILIDADES SUPABASE
+# ==========================================================
+def sb_download(path):
+    """Descarga archivo desde Supabase Storage."""
+    url = f"{SUPABASE_URL}/storage/v1/object/{path}"
+    r = requests.get(url, headers=HEADERS)
     if r.status_code == 200:
         return r.content
-    return None  # si no existe
+    return None
 
-def supabase_upload(path, bytes_data, mime="application/octet-stream"):
-    """Subir archivo a Supabase Storage"""
-    url = f"{BASE}/{path}"
-    headers = {
-        "Authorization": f"Bearer {SUPABASE_KEY}",
-        "Content-Type": mime,
-        "x-upsert": "true"
-    }
-    r = requests.put(url, headers=headers, data=bytes_data)
-    return r.status_code in (200, 201)
 
-def supabase_list(prefix):
-    """Listar archivos en un folder"""
-    url = f"{BASE}/list/{BUCKET}"
-    headers = {"Authorization": f"Bearer {SUPABASE_KEY}"}
-    r = requests.post(url, headers=headers, json={"prefix": prefix})
-    if r.status_code == 200:
-        return r.json()
-    return []
+def sb_upload(path, data_bytes, content_type):
+    """Sube archivo al Storage."""
+    url = f"{SUPABASE_URL}/storage/v1/object/{path}"
+    r = requests.put(url, headers={"Content-Type": content_type, **HEADERS}, data=data_bytes)
+    if r.status_code not in (200, 201):
+        print("❌ ERROR al subir:", r.text)
+    return r.text
 
-# ==========================================================
-# JSON LOAD / SAVE
-# ==========================================================
-def cargar_json_or_default(path, default):
-    data = supabase_download(path)
-    if not data:
-        return default
-    try:
-        return json.loads(data.decode("utf-8"))
-    except:
+
+def load_json(path, default):
+    """Carga JSON o lo crea si no existe."""
+    data = sb_download(path)
+    if data:
+        try:
+            return json.loads(data.decode("utf-8"))
+        except:
+            return default
+    else:
+        sb_upload(path, json.dumps(default).encode("utf-8"), "application/json")
         return default
 
-def guardar_json(path, data):
-    guardar = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
-    supabase_upload(path, guardar, mime="application/json")
+
+def save_json(path, data):
+    sb_upload(path, json.dumps(data, indent=2).encode("utf-8"), "application/json")
+
 
 # ==========================================================
-# UTILIDADES
+# 🎧 UTILIDADES LOCALES
 # ==========================================================
-def detectar_nombre_campo(texto, memoria):
+def detect_campo(texto, memoria):
     texto_lower = texto.lower()
-    patrones = [
-        r"campo\s+(?:de\s+)?([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)*)",
-        r"lote\s+(?:de\s+)?([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)*)",
+    patterns = [
+        r"campo\s+([A-Za-zÁÉÍÓÚÑáéíóú\s]+)",
+        r"lote\s+([A-Za-zÁÉÍÓÚÑáéíóú\s]+)",
     ]
 
     candidatos = []
-    for pat in patrones:
-        candidatos += re.findall(pat, texto, flags=re.IGNORECASE)
+    for patt in patterns:
+        import re
+        encontrados = re.findall(patt, texto, flags=re.IGNORECASE)
+        candidatos.extend([x.strip().title() for x in encontrados])
 
-    for conocido in memoria.keys():
-        if conocido.lower() in texto_lower:
-            candidatos.append(conocido)
+    for known in memoria.keys():
+        if known.lower() in texto_lower:
+            candidatos.append(known)
 
     if candidatos:
-        elegido = Counter(candidatos).most_common(1)[0][0].strip().title()
-        memoria[elegido] = memoria.get(elegido, 0) + 1
-        return elegido
-
-    gen = re.findall(r"\b[A-ZÁÉÍÓÚÑ][a-záéíóúñ]{3,}\b", texto)
-    if gen:
-        elegido = gen[0].title()
+        elegido = Counter(candidatos).most_common(1)[0][0]
         memoria[elegido] = memoria.get(elegido, 0) + 1
         return elegido
 
     return "Sin_identificar"
 
-def crear_docx(meta, texto):
-    doc = Document()
-    doc.add_heading(f"DG|AGRO360° – Transcripción: {meta['campo_detectado']}", 0)
-    doc.add_paragraph(f"📅 Fecha: {meta['fecha_archivo']}")
-    doc.add_paragraph(f"📁 Archivo: {meta['nombre']}")
-    doc.add_paragraph(f"⏱ Duración: {meta['duracion_min']} min")
-    doc.add_heading("Contenido", level=1)
-    doc.add_paragraph(texto)
 
-    filename = f"{meta['campo_detectado'].replace(' ','_')}_{meta['fecha_archivo']}.docx"
-    doc.save(filename)
-    return filename
+def crear_docx(path, meta, texto):
+    doc = Document()
+    doc.add_heading(f"Transcripción – {meta['campo']}", 0)
+    doc.add_paragraph(f"Fecha: {meta['fecha']}")
+    doc.add_paragraph(f"Duración: {meta['duracion']} min")
+    doc.add_paragraph(f"Archivo: {meta['nombre']}")
+    doc.add_paragraph("")
+    doc.add_heading("Texto", level=1)
+    doc.add_paragraph(texto)
+    doc.save(path)
+
 
 # ==========================================================
-# PROCESO PRINCIPAL
+# 🚀 MAIN
 # ==========================================================
 def main():
     print("🔄 Iniciando transcriptor DG|AGRO360° con SUPABASE...")
 
-    # JSONS
-    log = cargar_json_or_default(f"{BUCKET}/logs/.processed_log.json", {"procesados": {}})
-    memoria = cargar_json_or_default(f"{BUCKET}/logs/diccionario_campos.json", {})
+    # Carpeta lógica dentro del bucket
+    PATH_AUDIOS = f"{BUCKET}/audios"
+    PATH_TRANSCRIPCIONES = f"{BUCKET}/transcripciones"
+    PATH_LOG = f"{BUCKET}/logs/.processed_log.json"
+    PATH_MEM = f"{BUCKET}/logs/diccionario_campos.json"
 
-    # LISTA AUDIOS NUEVOS
-    archivos = supabase_list("audios/")
-    audios = [a for a in archivos if a["name"].lower().endswith((".m4a", ".mp3", ".wav"))]
+    # Load JSONs
+    log = load_json(PATH_LOG, {"procesados": {}})
+    memoria = load_json(PATH_MEM, {})
 
-    nuevos = [a for a in audios if a["id"] not in log["procesados"]]
+    # Listar audios (requiere REST API ListObjects)
+    list_url = f"{SUPABASE_URL}/storage/v1/object/list/{BUCKET}"
+    r = requests.post(list_url, headers=HEADERS, json={"prefix": "audios"})
+    audios = r.json()
+
+    nuevos = [a for a in audios if a["id"] not in log["procesados"] and a["name"].lower().endswith((".mp3",".m4a",".wav",".ogg"))]
 
     if not nuevos:
-        print("No hay audios nuevos.")
+        print("✅ No hay audios nuevos.")
         return
 
     print(f"🎧 Audios nuevos: {len(nuevos)}")
 
     modelo = whisper.load_model("small")
 
-    for a in tqdm(nuevos):
-        nombre = a["name"]
-        file_path = f"{BUCKET}/audios/{nombre}"
-        data = supabase_download(file_path)
+    for audio in tqdm(nuevos):
+        nombre = audio["name"]
+        file_id = audio["id"]
 
-        if not data:
-            continue
+        # Descargar audio
+        contenido = sb_download(f"{BUCKET}/{nombre}") or sb_download(f"{BUCKET}/audios/{nombre}")
+        temp = "temp_audio"
+        open(temp, "wb").write(contenido)
 
-        # guardar temp
-        temp_file = "temp_audio.m4a"
-        with open(temp_file, "wb") as f:
-            f.write(data)
+        # Datos
+        fecha = datetime.date.today().isoformat()
+        dur = round(len(AudioSegment.from_file(temp)) / 60000, 1)
 
-        fecha = re.search(r"(\d{4}-\d{2}-\d{2})", nombre)
-        fecha_archivo = fecha.group(1) if fecha else str(datetime.date.today())
+        # Transcribir
+        res = modelo.transcribe(temp, fp16=False)
+        texto = res["text"].strip()
 
-        try:
-            dur_min = round(len(AudioSegment.from_file(temp_file)) / 60000, 1)
-        except:
-            dur_min = None
+        campo = detect_campo(texto, memoria)
 
-        out = modelo.transcribe(temp_file, fp16=False)
-        texto = out["text"].strip()
+        meta = {"nombre": nombre, "fecha": fecha, "duracion": dur, "campo": campo}
 
-        campo = detectar_nombre_campo(texto, memoria)
+        # Crear DOCX local
+        docx_name = f"{campo.replace(' ','_')}_{fecha}.docx"
+        crear_docx(docx_name, meta, texto)
 
-        meta = {
-            "nombre": nombre,
-            "fecha_archivo": fecha_archivo,
-            "duracion_min": dur_min,
-            "campo_detectado": campo,
-        }
+        # Subir DOCX
+        sb_upload(f"{BUCKET}/transcripciones/{docx_name}",
+                  open(docx_name,"rb").read(),
+                  "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
 
-        # Crear DOCX
-        docx_name = crear_docx(meta, texto)
+        # Registrar log
+        log["procesados"][file_id] = meta
 
-        with open(docx_name, "rb") as f:
-            supabase_upload(
-                f"{BUCKET}/transcripciones/{fecha_archivo}/{docx_name}",
-                f.read(),
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-            )
-
+        os.remove(temp)
         os.remove(docx_name)
-        os.remove(temp_file)
 
-        log["procesados"][a["id"]] = meta
+    # Guardar JSONs
+    save_json(PATH_LOG, log)
+    save_json(PATH_MEM, memoria)
 
-    # Guardar JSONS
-    guardar_json(f"{BUCKET}/logs/.processed_log.json", log)
-    guardar_json(f"{BUCKET}/logs/diccionario_campos.json", memoria)
+    print("✅ COMPLETADO. Transcripciones subidas a SUPABASE.")
 
-    print("✅ TODO PROCESADO Y SUBIDO A SUPABASE.")
 
 if __name__ == "__main__":
     main()
+
 
 
 
