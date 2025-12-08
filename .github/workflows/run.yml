@@ -1,8 +1,8 @@
-name: Ejecutar Colab DGAGRO automáticamente
+name: Ejecutar transcriptor DGAGRO360°
 
 on:
   schedule:
-    - cron: "0 12 * * *"   # 09:00 AM Argentina
+    - cron: "0 12 * * *"   # Todos los días 09:00 Argentina
   workflow_dispatch:
 
 jobs:
@@ -10,6 +10,15 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Abrir notebook de Colab para ejecutar todo
+      - name: Checkout repo
+        uses: actions/checkout@v3
+
+      - name: Instalar dependencias
         run: |
-          curl -L -X GET "https://colab.research.google.com/drive/1QtkTUBCtuoHPUHwhO7AOiqIWmcy_ooBv"
+          pip install -r requirements.txt
+
+      - name: Ejecutar script
+        env:
+          GDRIVE_KEY: ${{ secrets.GDRIVE_KEY }}
+        run: |
+          python script.py
