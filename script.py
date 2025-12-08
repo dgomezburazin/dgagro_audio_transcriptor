@@ -2,90 +2,159 @@ import os
 import io
 import re
 import json
+import datetime as dt
 import hashlib
-import datetime
 from collections import Counter
 
-from dotenv import load_dotenv
 import requests
+from tqdm import tqdm
 from docx import Document
 from pydub import AudioSegment
 import whisper
-from tqdm import tqdm
+
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload
 
 # ==========================================================
-# 🔐 CARGAR VARIABLES DESDE SECRETS
+# 🔧 CONFIGURACIÓN GOOGLE DRIVE (SOLO LECTURA AUDIOS)
 # ==========================================================
-SUPABASE_URL = os.environ["SUPABASE_URL"]
-SUPABASE_ANON_KEY = os.environ["SUPABASE_ANON_KEY"]
-SUPABASE_SERVICE_ROLE = os.environ["SUPABASE_SERVICE_ROLE"]
+# Carpeta compartida donde subís los audios (IDs que me pasaste)
+FOLDER_AUDIO_ID = "1Wn_4pZm3QXVXCIwG9haPD8IzzTFZhLYn"
 
+def get_drive_service():
+    creds_json = os.environ["GDRIVE_KEY"]
+    info = json.loads(creds_json)
+    creds = service_account.Credentials.from_service_account_info(
+        info,
+        scopes=["https://www.googleapis.com/auth/drive.readonly"]
+    )
+    return build("drive", "v3", credentials=creds)
+
+drive = get_drive_service()
+
+def listar_archivos_carpeta(folder_id, extra_q=None):
+    q = f"'{folder_id}' in parents and trashed = false"
+    if extra_q:
+        q = f"{q} and {extra_q}"
+
+    files = []
+    page_token = None
+    while True:
+        resp = drive.files().list(
+            q=q,
+            fields="nextPageToken, files(id, name, mimeType)",
+            pageToken=page_token
+        ).execute()
+        files.extend(resp.get("files", []))
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            break
+    return files
+
+def descargar_archivo(file_id) -> bytes:
+    request = drive.files().get_media(fileId=file_id)
+    fh = io.BytesIO()
+    downloader = MediaIoBaseDownload(fh, request)
+    done = False
+    while not done:
+        status, done = downloader.next_chunk()
+    fh.seek(0)
+    return fh.read()
+
+def descargar_archivo_a_fisico(file_id, local_path):
+    content = descargar_archivo(file_id)
+    with open(local_path, "wb") as f:
+        f.write(content)
+
+# ==========================================================
+# 🗄️ CONFIGURACIÓN SUPABASE (ALMACENAMIENTO EXTERNO)
+# ==========================================================
+# ⚠️ Estos deben venir de GitHub Secrets:
+#   SUPABASE_URL = "https://wfqawfithisvwlqordjt.supabase.co"
+#   SUPABASE_KEY = anon/service key
+SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")   # ej: https://wfqawfithisvwlqordjt.supabase.co
+SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 BUCKET = "dgagro360-transcripciones"
 
-# ==========================================================
-# 🔧 UTILIDADES SUPABASE
-# ==========================================================
-def supabase_upload(path, data_bytes, content_type):
-    """Sube un archivo al bucket en Supabase Storage."""
-    url = f"{SUPABASE_URL}/storage/v1/object/{path}"
-    headers = {
-        "Content-Type": content_type,
-        "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE}",
-        "apikey": SUPABASE_SERVICE_ROLE,
-    }
-    r = requests.put(url, headers=headers, data=data_bytes)
-    if r.status_code not in (200, 201):
-        print("❌ Error al subir a Supabase:", r.text)
-    return r.status_code
+BASE_URL = f"{SUPABASE_URL}/storage/v1/object"
+BASE_HEADERS = {
+    "apikey": SUPABASE_KEY,
+    "Authorization": f"Bearer {SUPABASE_KEY}",
+}
 
-
-def supabase_download(path):
-    """Descarga un archivo desde Supabase Storage."""
-    url = f"{SUPABASE_URL}/storage/v1/object/{path}"
-    headers = {
-        "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE}",
-        "apikey": SUPABASE_SERVICE_ROLE,
-    }
-    r = requests.get(url, headers=headers)
+def supabase_download(path: str):
+    """
+    Descarga un archivo del bucket Supabase.
+    path es la RUTA DENTRO DEL BUCKET, e.g.:
+        logs/.processed_log.json
+        docx/maestro/2025-12-08/Transcripciones_Completas_2025-12-08.docx
+    """
+    url = f"{BASE_URL}/{BUCKET}/{path.lstrip('/')}"
+    r = requests.get(url, headers=BASE_HEADERS)
     if r.status_code == 200:
         return r.content
+    if r.status_code != 404:
+        print(f"⚠️ Supabase download error ({path}): {r.status_code} -> {r.text}")
     return None
 
-
-def supabase_list(prefix):
-    """Lista archivos con un prefijo."""
-    url = f"{SUPABASE_URL}/storage/v1/object/list/{BUCKET}"
-    r = requests.post(
-        url,
-        headers={
-            "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE}",
-            "apikey": SUPABASE_SERVICE_ROLE,
-            "Content-Type": "application/json",
-        },
-        json={"prefix": prefix, "limit": 2000},
-    )
-    return r.json()
-
+def supabase_upload(path: str, bytes_data: bytes, mime: str = "application/octet-stream"):
+    """
+    Sube (o reemplaza) un archivo en el bucket Supabase.
+    """
+    url = f"{BASE_URL}/{BUCKET}/{path.lstrip('/')}"
+    headers = {
+        **BASE_HEADERS,
+        "Content-Type": mime,
+    }
+    r = requests.put(url, headers=headers, data=bytes_data)
+    if r.status_code not in (200, 201):
+        print(f"❌ Error subiendo a Supabase ({path}): {r.status_code} -> {r.text}")
+    else:
+        print(f"✅ Subido/actualizado en Supabase: {path}")
+    return r
 
 # ==========================================================
-# HASH Y UTILIDADES DE AUDIO
+# 📓 LOGS Y MEMORIA EN SUPABASE
+# ==========================================================
+LOG_PATH = "logs/.processed_log.json"
+MEMORIA_PATH = "logs/memoria_campos.json"
+
+def cargar_json_or_default(path: str, default_value):
+    content = supabase_download(path)
+    if content is None:
+        print(f"ℹ️ No existe aún {path} en Supabase, se crea desde cero.")
+        return default_value
+    try:
+        txt = content.decode("utf-8").strip()
+        if not txt:
+            return default_value
+        return json.loads(txt)
+    except Exception as e:
+        print(f"⚠️ Error leyendo JSON {path}, se reinicia. Detalle: {e}")
+        return default_value
+
+def guardar_json(path: str, data):
+    data_bytes = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
+    supabase_upload(path, data_bytes, mime="application/json")
+
+# ==========================================================
+# 🧮 UTILIDADES LOCALES
 # ==========================================================
 def duracion_min(path):
     try:
         a = AudioSegment.from_file(path)
         return round(len(a) / 60000, 1)
-    except:
+    except Exception:
         return None
-
 
 def detectar_nombre_campo(texto, memoria):
     texto_lower = texto.lower()
     patrones = [
-        r"campo\s+([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)",
-        r"lote\s+([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)",
+        r"campo\s+(?:de\s+)?([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)*)",
+        r"lote\s+(?:de\s+)?([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)*)",
     ]
     candidatos = []
-
     for pat in patrones:
         candidatos += re.findall(pat, texto, flags=re.IGNORECASE)
 
@@ -94,7 +163,7 @@ def detectar_nombre_campo(texto, memoria):
             candidatos.append(conocido)
 
     if candidatos:
-        nombre = Counter(candidatos).most_common(1)[0][0].title()
+        nombre = Counter(candidatos).most_common(1)[0][0].strip().title()
         memoria[nombre] = memoria.get(nombre, 0) + 1
         return nombre
 
@@ -106,163 +175,186 @@ def detectar_nombre_campo(texto, memoria):
 
     return "Sin identificar"
 
-
-# ==========================================================
-# JSONS (LOG + MEMORIA)
-# ==========================================================
-def cargar_json_or_default(path, default):
-    content = supabase_download(path)
-    if content:
-        try:
-            return json.loads(content.decode("utf-8"))
-        except:
-            return default
-    else:
-        supabase_upload(path, json.dumps(default).encode("utf-8"), "application/json")
-        return default
-
-
-def guardar_json(path, data):
-    supabase_upload(path, json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8"),
-                    "application/json")
-
-
-# ==========================================================
-# CREAR DOCX
-# ==========================================================
-def crear_docx(path_local, meta, texto):
+def crear_docx_audio(salida_path, meta, texto):
     doc = Document()
-    doc.add_heading(f"DGAGRO360° – Transcripción: {meta['campo']}", 0)
-    doc.add_paragraph(f"📅 Fecha: {meta['fecha']}")
-    doc.add_paragraph(f"⏱ Duración: {meta['duracion']} min")
-    doc.add_paragraph(f"🎧 Archivo: {meta['nombre']}")
+    doc.add_heading(f"Lomas_Pampeanas – Transcripción: {meta['campo_detectado']}", 0)
+    doc.add_paragraph(f"📅 Fecha: {meta['fecha_archivo']}")
+    doc.add_paragraph(f"⏱ Duración: {meta['duracion_min']} min")
+    doc.add_paragraph(f"📁 Archivo original: {meta['nombre']}")
     doc.add_paragraph("")
     doc.add_heading("📝 Transcripción completa", level=1)
     doc.add_paragraph(texto)
-    doc.save(path_local)
+    doc.save(salida_path)
 
+def crear_o_actualizar_maestro(fecha_dia, items_fecha):
+    """
+    Crea o actualiza el Word maestro por día dentro de Supabase:
+      docx/maestro/{fecha}/Transcripciones_Completas_{fecha}.docx
+    """
+    nombre_maestro = f"Transcripciones_Completas_{fecha_dia}.docx"
+    supa_path = f"docx/maestro/{fecha_dia}/{nombre_maestro}"
 
-# ==========================================================
-# PROCESAMIENTO PRINCIPAL
-# ==========================================================
-def main():
+    local_path = f"maestro_{fecha_dia}.docx"
 
-    print("🔄 Iniciando transcriptor DG|AGRO360° con SUPABASE...")
-
-    # 1) Cargar JSONs
-    log = cargar_json_or_default(f"{BUCKET}/logs/.processed_log.json",
-                                 {"procesados": {}})
-    memoria = cargar_json_or_default(f"{BUCKET}/logs/diccionario_campos.json", {})
-
-    # 2) Listar audios nuevos
-    listado = supabase_list("audios/")
-    archivos = [a for a in listado if a["name"].lower().endswith((".m4a", ".mp3", ".wav"))]
-
-    nuevos = [a for a in archivos if a["name"] not in log["procesados"]]
-
-    print(f"🎧 Audios nuevos detectados: {len(nuevos)}")
-
-    if not nuevos:
-        print("✔ No hay audios nuevos. Fin.")
-        return
-
-    print("🧠 Cargando modelo Whisper...")
-    modelo = whisper.load_model("small")
-
-    resumen_por_fecha = {}
-
-    # 3) PROCESAR
-    for audio in tqdm(nuevos):
-
-        name = audio["name"]
-        full_path = f"{BUCKET}/audios/{name}"
-
-        contenido = supabase_download(full_path)
-        if not contenido:
-            print("❌ Error al descargar audio:", name)
-            continue
-
-        local_temp = f"temp_{name}"
-        with open(local_temp, "wb") as f:
+    # Intentar descargar maestro existente
+    contenido = supabase_download(supa_path)
+    if contenido:
+        with open(local_path, "wb") as f:
             f.write(contenido)
-
-        fecha = re.search(r"\d{4}-\d{2}-\d{2}", name)
-        fecha = fecha.group(0) if fecha else datetime.date.today().isoformat()
-
-        dur = duracion_min(local_temp)
-
-        out = modelo.transcribe(local_temp, fp16=False)
-        texto = out.get("text", "").strip()
-
-        campo = detectar_nombre_campo(texto, memoria)
-
-        meta = {
-            "nombre": name,
-            "fecha": fecha,
-            "campo": campo,
-            "duracion": dur,
-        }
-
-        # Guardar resumen
-        resumen_por_fecha.setdefault(fecha, []).append({"meta": meta, "texto": texto})
-
-        log["procesados"][name] = {"fecha": fecha, "campo": campo}
-
-        os.remove(local_temp)
-
-    # 4) SUBIR RESULTADOS
-    for fecha, items in resumen_por_fecha.items():
-        carpeta_fecha = f"{BUCKET}/transcripciones/{fecha}/"
-
-        # Individuales
-        for item in items:
-            meta = item["meta"]
-            texto = item["texto"]
-            campo_slug = meta["campo"].replace(" ", "_")
-            doc_name = f"{campo_slug}_{fecha}.docx"
-
-            local_doc = f"out_{doc_name}"
-            crear_docx(local_doc, meta, texto)
-
-            with open(local_doc, "rb") as f:
-                supabase_upload(
-                    f"{carpeta_fecha}{doc_name}",
-                    f.read(),
-                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                )
-
-            os.remove(local_doc)
-
-        # Maestro
-        maestro_local = f"maestro_{fecha}.docx"
+        doc = Document(local_path)
+        doc.add_paragraph("")
+        doc.add_paragraph("──────────────────────────────")
+        doc.add_paragraph(f"Nuevas transcripciones agregadas el {fecha_dia}")
+        print(f"📎 Actualizando maestro existente: {nombre_maestro}")
+    else:
         doc = Document()
-        doc.add_heading(f"DGAGRO360° – Maestro diario {fecha}", 0)
+        doc.add_heading("Lomas_Pampeanas – Compilado General de Transcripciones", 0)
+        doc.add_paragraph(f"Actualizado al {fecha_dia}")
+        doc.add_paragraph("")
+        print(f"📄 Creando nuevo maestro: {nombre_maestro}")
 
-        for item in items:
-            doc.add_heading(f"📍 {item['meta']['campo']}", level=1)
-            doc.add_paragraph(item["texto"])
+    # Agregar por campo
+    agrupados = {}
+    for it in items_fecha:
+        agrupados.setdefault(it["campo_detectado"], []).append(it)
+
+    for campo, lista in agrupados.items():
+        doc.add_heading(f"📍 {campo}", level=1)
+        for it in sorted(lista, key=lambda x: x["fecha_archivo"]):
+            doc.add_heading(f"🎧 Audio – {it['fecha_archivo']}", level=2)
+            doc.add_paragraph(it["texto"])
             doc.add_paragraph("")
 
-        doc.save(maestro_local)
+    doc.save(local_path)
 
-        with open(maestro_local, "rb") as f:
-            supabase_upload(
-                f"{carpeta_fecha}/maestro_{fecha}.docx",
-                f.read(),
-                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            )
+    with open(local_path, "rb") as f:
+        data = f.read()
+    supabase_upload(
+        supa_path,
+        data,
+        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
+    os.remove(local_path)
+    print(f"📘 Maestro diario actualizado: {nombre_maestro}")
 
-        os.remove(maestro_local)
+# ==========================================================
+# 🚀 PROCESAMIENTO PRINCIPAL
+# ==========================================================
+def main():
+    print("🔄 Iniciando transcriptor DG|AGRO360° con SUPABASE...")
 
-    # 5) Guardar JSONs actualizados
-    guardar_json(f"{BUCKET}/logs/.processed_log.json", log)
-    guardar_json(f"{BUCKET}/logs/diccionario_campos.json", memoria)
+    # 1) Cargar log y memoria desde Supabase
+    log = cargar_json_or_default(LOG_PATH, {"procesados": {}})
+    memoria_campos = cargar_json_or_default(MEMORIA_PATH, {})
 
-    print("✔ PROCESO COMPLETADO – Archivos subidos a Supabase.")
+    # 2) Listar audios en la carpeta de origen (Drive)
+    archivos = listar_archivos_carpeta(FOLDER_AUDIO_ID)
+    exts = (".mp3", ".m4a", ".wav", ".ogg", ".flac", ".aac")
+    audios = [a for a in archivos if a["name"].lower().endswith(exts)]
+
+    print(f"🔍 Audios encontrados en carpeta de origen (Drive): {len(audios)}")
+
+    procesados_ids = set(log.get("procesados", {}).keys())
+    nuevos = [a for a in audios if a["id"] not in procesados_ids]
+
+    if not nuevos:
+        print("✅ No hay audios nuevos para procesar. Fin.")
+        return
+
+    print(f"🎧 Audios NUEVOS a procesar: {len(nuevos)}")
+
+    # 3) Cargar modelo Whisper una sola vez
+    print("🧠 Cargando modelo Whisper 'small'...")
+    modelo = whisper.load_model("small")
+
+    resumen_items = []
+
+    for audio in tqdm(nuevos, desc="Transcribiendo"):
+        file_id = audio["id"]
+        nombre = audio["name"]
+
+        # Descargar audio a archivo temporal
+        temp_audio = f"temp_{file_id}.audio"
+        descargar_archivo_a_fisico(file_id, temp_audio)
+
+        # Fecha desde nombre o actual
+        fecha_match = re.search(r"(\d{4}-\d{2}-\d{2})", nombre)
+        if fecha_match:
+            fecha_archivo = fecha_match.group(1)
+        else:
+            fecha_archivo = dt.date.today().isoformat()
+
+        # Duración aprox
+        dur_min = duracion_min(temp_audio)
+
+        # Transcripción con Whisper
+        out = modelo.transcribe(temp_audio, fp16=False)
+        texto = out.get("text", "").strip()
+
+        # Detección de campo
+        campo_detectado = detectar_nombre_campo(texto, memoria_campos)
+
+        meta = {
+            "id": file_id,
+            "nombre": nombre,
+            "fecha_archivo": fecha_archivo,
+            "duracion_min": dur_min,
+            "campo_detectado": campo_detectado,
+            "texto": texto,
+        }
+        resumen_items.append(meta)
+
+        # Crear docx individual y subirlo a Supabase
+        campo_slug = re.sub(r"[^A-Za-z0-9_ÁÉÍÓÚÑáéíóúñ]", "_", campo_detectado)
+        nombre_docx = f"{campo_slug}_{fecha_archivo}.docx"
+        local_docx = f"doc_{file_id}.docx"
+        crear_docx_audio(local_docx, meta, texto)
+
+        with open(local_docx, "rb") as f:
+            data_docx = f.read()
+
+        supa_path_docx = f"docx/por_audio/{fecha_archivo}/{nombre_docx}"
+        supabase_upload(
+            supa_path_docx,
+            data_docx,
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+
+        # Limpiar temporales
+        try:
+            os.remove(temp_audio)
+        except FileNotFoundError:
+            pass
+        try:
+            os.remove(local_docx)
+        except FileNotFoundError:
+            pass
+
+        # Actualizar log en memoria
+        log["procesados"][file_id] = {
+            "nombre": nombre,
+            "campo": campo_detectado,
+            "fecha": fecha_archivo,
+        }
+
+    # 4) Crear/actualizar maestros por fecha en Supabase
+    agrupados_por_fecha = {}
+    for it in resumen_items:
+        agrupados_por_fecha.setdefault(it["fecha_archivo"], []).append(it)
+
+    for fecha_dia, lista_dia in agrupados_por_fecha.items():
+        crear_o_actualizar_maestro(fecha_dia, lista_dia)
+
+    # 5) Guardar log y memoria de vuelta en Supabase
+    guardar_json(LOG_PATH, log)
+    guardar_json(MEMORIA_PATH, memoria_campos)
+
+    print("✅ Proceso completo: audios nuevos transcritos y subidos a Supabase.")
 
 
 if __name__ == "__main__":
     main()
+
 
 
 
