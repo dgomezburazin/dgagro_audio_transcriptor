@@ -19,10 +19,14 @@ from tqdm import tqdm
 # CONFIGURACIÓN DE CARPETAS EN DRIVE
 # ==========================================================
 # Carpeta donde subís los audios crudos + jsons (.processed_log, diccionario_campos)
-FOLDER_AUDIO_ID = "1NUq38acTjxIuEvhPgUvFnFlGEOdw8X5i"
+#FOLDER_AUDIO_ID = "1NUq38acTjxIuEvhPgUvFnFlGEOdw8X5i"
 
 # Carpeta raíz donde querés que vayan las transcripciones (subcarpetas por fecha)
-FOLDER_TRANSCRIPCIONES_ID = "1UneuMrWOAiirDIFWLYaQe5oyUrfBU9ZG"
+#FOLDER_TRANSCRIPCIONES_ID = "1UneuMrWOAiirDIFWLYaQe5oyUrfBU9ZG"
+# NUEVOS IDs — DRIVE COMPARTIDO (funciona 100%)
+FOLDER_AUDIO_ID = "1Wn_4pZm3QXVXCIwG9haPD8IzzTFZhLYn"
+FOLDER_TRANSCRIPCIONES_ID = "1aDnxpvJSohDfzDq4r5I-fuyxq3BEQ0MD"
+
 
 # Nombres fijos de los JSON en la carpeta de audios
 LOG_NAME = ".processed_log.json"
