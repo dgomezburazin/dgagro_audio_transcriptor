@@ -1,33 +1,25 @@
-name: Ejecutar transcriptor DGAGRO360 con Supabase
+name: Ejecutar transcriptor DGAGRO360°
 
 on:
-  workflow_dispatch:    # Ejecutar a mano
-  schedule:
-    - cron: "*/30 * * * *"   # Cada 30 minutos (se puede ajustar)
+  workflow_dispatch:
 
 jobs:
-  run-script:
+  run:
     runs-on: ubuntu-latest
 
     steps:
+      - uses: actions/checkout@v3
 
-    - name: Checkout del código
-      uses: actions/checkout@v3
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          pip install openai-whisper python-docx pydub tqdm requests
 
-    - name: Configurar Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.10'
+      - name: Run script
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python script.py
 
-    - name: Instalar dependencias
-      run: |
-        python -m pip install --upgrade pip
-        pip install python-dotenv requests python-docx pydub tqdm openai-whisper
-
-    - name: Ejecutar script
-      env:
-        SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-        SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
-        SUPABASE_SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE }}
-      run: python script.py
 
