@@ -1,0 +1,22 @@
+name: Ejecutar transcriptor DGAGRO
+
+on:
+  schedule:
+    - cron: "0 12 * * *"   # Corre todos los días a las 09:00 AM Argentina (12 UTC)
+  workflow_dispatch:       # Te permite ejecutarlo manualmente desde GitHub
+
+jobs:
+  run-script:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout del código
+      uses: actions/checkout@v3
+
+    - name: Instalar dependencias
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Ejecutar script
+      run: python script.py
