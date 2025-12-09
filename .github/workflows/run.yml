@@ -1,7 +1,9 @@
 name: Ejecutar transcriptor DGAGRO360°
 
 on:
-  workflow_dispatch:
+  workflow_dispatch:   # ejecutar a mano
+  # schedule:
+  #   - cron: "0 * * * *"   # cada 1 hora (opcional)
 
 jobs:
   run:
@@ -10,16 +12,45 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
-      - name: Install dependencies
+      # -----------------------------------------------------
+      # 📌 1. Instalar dependencias del sistema
+      # -----------------------------------------------------
+      - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
-          pip install openai-whisper python-docx pydub tqdm requests
 
+      # -----------------------------------------------------
+      # 📌 2. Instalar librerías de Python (COMPLETAS)
+      # -----------------------------------------------------
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          pip install \
+            openai-whisper \
+            python-docx \
+            pydub \
+            tqdm \
+            requests \
+            google-api-python-client \
+            google-auth \
+            google-auth-httplib2 \
+            google-auth-oauthlib
+
+      # -----------------------------------------------------
+      # 📌 3. Ejecutar script con los SECRETS
+      # -----------------------------------------------------
       - name: Run script
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+
+          # Email opcional (si no lo usás, el script lo ignora)
+          EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_RECIPIENT: ${{ secrets.EMAIL_RECIPIENT }}
         run: python script.py
+
 
 
