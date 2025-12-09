@@ -47,14 +47,69 @@ if not GOOGLE_SA_JSON:
     raise RuntimeError("❌ Falta GOOGLE_SERVICE_ACCOUNT_JSON en los secrets de GitHub.")
 
 # ==========================================================
-# 🔌 CLIENTE GOOGLE DRIVE (Service Account)
+# 🔐 NORMALIZACIÓN AUTOMÁTICA DEL SERVICE ACCOUNT
+# ==========================================================
+def load_and_fix_service_account_json():
+    """
+    Repara automáticamente problemas de formato del JSON del Service Account
+    cuando viene desde GitHub Secrets:
+    - Convierte "\\n" en saltos reales
+    - Quita espacios basura
+    - Repara el cierre END PRIVATE KEY si está mal pegado
+    """
+    raw = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
+    if not raw:
+        raise RuntimeError("❌ Falta GOOGLE_SERVICE_ACCOUNT_JSON en los secrets de GitHub.")
+
+    try:
+        info = json.loads(raw)
+    except Exception as e:
+        raise RuntimeError(f"❌ Error al interpretar GOOGLE_SERVICE_ACCOUNT_JSON: {e}")
+
+    if "private_key" not in info:
+        raise RuntimeError("❌ El JSON no contiene 'private_key'.")
+
+    key = info["private_key"]
+
+    # Si tiene \n literales → convertir a saltos reales
+    if "\\n" in key:
+        key = key.replace("\\n", "\n")
+
+    # Quitar espacios extras
+    key = key.strip()
+
+    # Reparar si falta el final
+    if "END PRIVATE KEY" not in key:
+        # Intento de reparación automática
+        key = key.split("-----END PRIVATE KEY-----")[0]
+        key += "\n-----END PRIVATE KEY-----\n"
+
+    info["private_key"] = key
+    return info
+
+
+# ==========================================================
+# 📂 CLIENTE GOOGLE DRIVE
 # ==========================================================
 def build_drive_service():
-    info = json.loads(GOOGLE_SA_JSON)
+    info = load_and_fix_service_account_json()   # ← USAMOS LA VERSIÓN REPARADA
+
     scopes = ["https://www.googleapis.com/auth/drive.readonly"]
-    creds = service_account.Credentials.from_service_account_info(info, scopes=scopes)
+
+    try:
+        creds = service_account.Credentials.from_service_account_info(
+            info,
+            scopes=scopes
+        )
+    except Exception as e:
+        print("❌ ERROR DESERIALIZANDO PRIVATE KEY")
+        print("Texto recibido:")
+        print(info["private_key"])
+        raise RuntimeError(f"No se pudo cargar la clave privada: {e}")
+
     service = build("drive", "v3", credentials=creds, cache_discovery=False)
     return service
+
 
 # ==========================================================
 # ☁️ FUNCIONES SUPABASE STORAGE
